@@ -47,7 +47,8 @@ def _mapper(x: np.ndarray, y: np.ndarray, train_count: int, step: float) -> np.n
 
 @dataclass
 class BiasCorrectDaily:
-    """Daily bias correction using pooled day-of-year quantile mapping.
+    """
+    Daily bias correction using pooled day-of-year quantile mapping.
 
     The implementation follows the original repository's intent:
     - align observation and modeled data on intersecting timestamps
@@ -68,7 +69,8 @@ class BiasCorrectDaily:
         modeled_var: str,
         njobs: int = 1,
     ) -> xr.Dataset:
-        """Perform bias correction.
+        """
+        Perform bias correction.
 
         Parameters
         ----------
@@ -83,106 +85,100 @@ class BiasCorrectDaily:
         njobs:
             Number of parallel jobs.
         """
-        if obs_var not in obs:
-            raise KeyError(f"Observation variable not found: {obs_var}")
-        if modeled_var not in modeled:
-            raise KeyError(f"Modeled variable not found: {modeled_var}")
+
+        # --- basic checks ---
+        for name, ds in [(obs_var, obs), (modeled_var, modeled)]:
+            if name not in ds:
+                raise KeyError(f"{name} not found")
+
         for dim in ("time", "lat", "lon"):
-            if dim not in obs[obs_var].dims:
-                raise ValueError(f"obs[{obs_var!r}] must have dimension {dim!r}")
-            if dim not in modeled[modeled_var].dims:
-                raise ValueError(
-                    f"modeled[{modeled_var!r}] must have dimension {dim!r}"
-                )
+            if dim not in obs[obs_var].dims or dim not in modeled[modeled_var].dims:
+                raise ValueError(f"Missing dim: {dim}")
 
         obs = _ensure_daily_datetime_sorted(obs)
         modeled = _ensure_daily_datetime_sorted(modeled)
 
-        # Intersect time periods, preserving only shared timestamps.
-        intersection = np.intersect1d(obs["time"].values, modeled["time"].values)
-        if intersection.size == 0:
-            raise ValueError(
-                "No overlapping timestamps were found between obs and modeled."
-            )
+        # --- align time ---
+        t = np.intersect1d(obs.time.values, modeled.time.values)
+        if t.size == 0:
+            raise ValueError("No overlapping timestamps")
 
-        obs = obs.sel(time=intersection)
-        modeled = modeled.sel(time=intersection)
+        obs = obs.sel(time=t)
+        modeled = modeled.sel(time=t)
 
         obs_da = obs[obs_var]
-        modeled_da = modeled[modeled_var]
+        mod_da = modeled[modeled_var]
 
-        dayofyear = obs["time"].dt.dayofyear
-        lat_vals = modeled["lat"].values
-        lon_vals = modeled["lon"].values
+        doy = obs.time.dt.dayofyear.values
+        lat_vals = modeled.lat.values
+        lon_vals = modeled.lon.values
 
-        mapped_data = np.full(
-            (intersection.shape[0], lat_vals.shape[0], lon_vals.shape[0]),
+        out_arr = np.full(
+            (len(t), len(lat_vals), len(lon_vals)),
             np.nan,
             dtype=np.float32,
         )
 
-        unique_days = np.unique(dayofyear.values)
+        # --- main loop ---
+        for d in np.unique(doy):
+            dayrange = _day_range(int(d), self.pool)
 
-        for day in unique_days:
-            print(f"Processing day-of-year {int(day)}")
-            dayrange = _day_range(int(day), self.pool)
+            mask = np.isin(doy, dayrange)
+            subobs = obs_da.sel(time=mask)
+            submod = mod_da.sel(time=mask)
 
-            day_mask = xr.DataArray(
-                np.isin(dayofyear.values, dayrange),
-                coords={"time": obs["time"].values},
-                dims=("time",),
-            )
+            sub_doy = subobs.time.dt.dayofyear.values
+            idx_sub = np.where(sub_doy == d)[0]
+            idx_out = np.where(doy == d)[0]
 
-            subobs = obs_da.sel(time=day_mask)
-            submodeled = modeled_da.sel(time=day_mask)
-
-            sub_doy = subobs["time"].dt.dayofyear.values
-            sub_curr_day_rows = np.where(sub_doy == day)[0]
-            curr_day_rows = np.where(dayofyear.values == day)[0]
-
-            train_idx = np.where(subobs["time"].dt.year.values <= self.max_train_year)[
-                0
-            ]
+            train_idx = np.where(subobs.time.dt.year <= self.max_train_year)[0]
             if train_idx.size == 0:
-                raise ValueError(
-                    f"No training samples found for day {day}"
-                    f"with max_train_year={self.max_train_year}."
+                raise ValueError(f"No training data for DOY {d}")
+
+            train_n = train_idx[-1] + 1
+
+            jobs = [
+                delayed(_mapper)(
+                    subobs.sel(lat=lat, lon=lon_vals, method="nearest").values,
+                    submod.sel(lat=lat, lon=lon_vals).values,
+                    train_n,
+                    self.step,
                 )
+                for lat in lat_vals
+            ]
 
-            # Original code used the last eligible index, then sliced with [:train_num].
-            # That excludes the last eligible item by mistake. Here we use a true count.
-            train_count = int(train_idx[-1]) + 1
+            mapped = np.asarray(Parallel(n_jobs=njobs)(jobs), dtype=np.float32)
+            mapped = np.swapaxes(mapped[:, idx_sub, :], 0, 1)
 
-            jobs = []
-            for lat in lat_vals:
-                x_lat = subobs.sel(lat=lat, lon=lon_vals, method="nearest").values
-                y_lat = submodeled.sel(lat=lat, lon=lon_vals).values
-                jobs.append(delayed(_mapper)(x_lat, y_lat, train_count, self.step))
+            out_arr[idx_out] = mapped
 
-            print(f"Running {len(jobs)} latitude jobs")
-            day_mapped = np.asarray(Parallel(n_jobs=njobs)(jobs), dtype=np.float32)
-            day_mapped = day_mapped[:, sub_curr_day_rows, :]
-            day_mapped = np.swapaxes(day_mapped, 0, 1)  # (time, lat, lon)
-            mapped_data[curr_day_rows, :, :] = day_mapped
-
-        bias_corrected = xr.DataArray(
-            mapped_data,
-            coords={
-                "time": obs["time"].values,
-                "lat": lat_vals,
-                "lon": lon_vals,
-            },
+        # --- build dataset ---
+        bc = xr.DataArray(
+            out_arr,
+            coords={"time": t, "lat": lat_vals, "lon": lon_vals},
             dims=("time", "lat", "lon"),
             name="bias_corrected",
-            attrs={"gridtype": "latlon"},
         )
 
-        ds_bc = xr.Dataset({"bias_corrected": bias_corrected})
+        out = modeled.drop_vars([modeled_var], errors="ignore")
+        out["bias_corrected"] = bc.reindex_like(modeled[modeled_var])
 
-        # Preserve the modeled dataset structure as much as possible.
-        out = modeled.copy()
-        out = out.drop_vars([modeled_var], errors="ignore")
-        out["bias_corrected"] = ds_bc["bias_corrected"].reindex_like(
-            modeled[modeled_var]
-        )
+        # --- CF metadata (for CDO) ---
+        if "lat" in out:
+            out.lat.attrs.update(
+                {
+                    "standard_name": "latitude",
+                    "units": "degrees_north",
+                    "axis": "Y",
+                }
+            )
+        if "lon" in out:
+            out.lon.attrs.update(
+                {
+                    "standard_name": "longitude",
+                    "units": "degrees_east",
+                    "axis": "X",
+                }
+            )
+
         return out
