@@ -4,21 +4,21 @@ set -euo pipefail
 DATADIR=${DATADIR:-"$HOME/Workspace/corrdiff/bcsd/data"}
 WORKDIR=${WORKDIR:-"$HOME/Workspace/corrdiff/bcsd/bcsd-run"}
 
-PRISM="$DATADIR/prism_example.nc"
-MERRA="$DATADIR/merra_example.nc"
+HR_NC="$DATADIR/highres.nc"
+LR_NC="$DATADIR/lowres.nc"
 
-PRISM_UPSCALED="$WORKDIR/prism_upscaled.nc"
-MERRA_FILLED="$WORKDIR/merra_filled.nc"
-TMP_FILLED="$WORKDIR/tmp_prism_filled.nc"
+HR_UPSCALED="$WORKDIR/hr_upscaled.nc"
+LR_FILLED="$WORKDIR/lr_filled.nc"
+TMP_HR_FILLED="$WORKDIR/tmp_hr_filled.nc"
 
-MERRA_BC="$WORKDIR/merra_bc.nc"
-PRISM_GRID="$WORKDIR/prism_grid"
-MERRA_BC_INTERP="$WORKDIR/merra_bc_interp.nc"
-PRISM_REINTERPOLATED="$WORKDIR/prism_reinterpolated.nc"
-PRISM_INTERP_YDAYAVG="$WORKDIR/prism_interpolated_ydayavg.nc"
-PRISM_YDAYAVG="$WORKDIR/prism_ydayavg.nc"
+LR_BC="$WORKDIR/lr_bc.nc"
+HR_GRID="$WORKDIR/hr_grid"
+LR_BC_INTERP="$WORKDIR/lr_bc_interp.nc"
+HR_REINTERPOLATED="$WORKDIR/hr_reinterpolated.nc"
+HR_INTERP_YDAYAVG="$WORKDIR/hr_interpolated_ydayavg.nc"
+HR_YDAYAVG="$WORKDIR/hr_ydayavg.nc"
 SCALE_FACTORS="$WORKDIR/scale_factors.nc"
-MERRA_BCSD="$WORKDIR/merra_bcsd.nc"
+LR_BCSD="$WORKDIR/lr_bcsd.nc"
 
 BIAS_SCRIPT="./merra_prism_example.py"
 SPATIAL_SCRIPT="./spatial_scaling.py"
@@ -27,101 +27,105 @@ mkdir -p "$WORKDIR"
 
 echo "DATADIR:  $DATADIR"
 echo "WORKDIR:  $WORKDIR"
-echo "PRISM:    $PRISM"
-echo "MERRA:    $MERRA"
+echo "HR:    $HR_NC"
+echo "LR:    $LR_NC"
 
-[[ -f "$PRISM" ]] || { echo "Missing input: $PRISM"; exit 1; }
-[[ -f "$MERRA" ]] || { echo "Missing input: $MERRA"; exit 1; }
+[[ -f "$HR_NC" ]] || { echo "Missing input: $HR_NC"; exit 1; }
+[[ -f "$LR_NC" ]] || { echo "Missing input: $LR_NC"; exit 1; }
 [[ -f "$BIAS_SCRIPT" ]] || { echo "Missing script: $BIAS_SCRIPT"; exit 1; }
 [[ -f "$SPATIAL_SCRIPT" ]] || { echo "Missing script: $SPATIAL_SCRIPT"; exit 1; }
 
 # --------------------------------
 # Step 1: Preprocess
 # --------------------------------
-if [[ -f "$PRISM_UPSCALED" && -f "$MERRA_FILLED" ]]; then
+if [[ -f "$HR_UPSCALED" && -f "$LR_FILLED" ]]; then
     echo "=== Preprocess outputs already exist; skipping ==="
 else
-    echo "=== Preprocess ==="
+    echo -e "\n=== Preprocess ==="
 
-    cdo griddes "$MERRA" > "$WORKDIR/merra_grid.txt"
-    cdo fillmiss2 "$PRISM" "$TMP_FILLED"
-    cdo -P 8 remapbil,"$WORKDIR/merra_grid.txt" -gridboxmean,3,3 "$TMP_FILLED" "$PRISM_UPSCALED"
-    cdo fillmiss2 "$MERRA" "$MERRA_FILLED"
+    # HR_NC -> fill missing (TMP_HR_FILLED)
+    #       -> coarse via gridboxmean & remap to LOWRES grid (HR_UPSCALED)
+    cdo griddes "$LR_NC" > "$WORKDIR/lr_grid.txt"
+    cdo fillmiss2 "$HR_NC" "$TMP_HR_FILLED"
+    cdo -P 8 remapbil,"$WORKDIR/lr_grid.txt" -gridboxmean,3,3 "$TMP_HR_FILLED" "$HR_UPSCALED"
 
-    [[ -f "$PRISM_UPSCALED" ]] || { echo "Failed to create $PRISM_UPSCALED"; exit 1; }
-    [[ -f "$MERRA_FILLED" ]] || { echo "Failed to create $MERRA_FILLED"; exit 1; }
+    # LR_NC -> fill missing (LR_FILLED)
+    cdo fillmiss2 "$LR_NC" "$LR_FILLED"
 
-    rm -f "$TMP_FILLED" "$WORKDIR/merra_grid.txt"
+    [[ -f "$HR_UPSCALED" ]] || { echo "Failed to create $HR_UPSCALED"; exit 1; }
+    [[ -f "$LR_FILLED" ]] || { echo "Failed to create $LR_FILLED"; exit 1; }
+
+    rm -f "$TMP_HR_FILLED" "$WORKDIR/lr_grid.txt"
 fi
 
 # --------------------------------
 # Step 2: Bias Correction
 # --------------------------------
-if [[ -f "$MERRA_BC" ]]; then
+if [[ -f "$LR_BC" ]]; then
     echo "=== Bias-corrected file already exists; skipping ==="
 else
-    echo "=== Bias Correction ==="
-    python "$BIAS_SCRIPT" "$PRISM_UPSCALED" "$MERRA_FILLED" ppt PRECTOTLAND "$MERRA_BC"
-    [[ -f "$MERRA_BC" ]] || { echo "Missing output: $MERRA_BC"; exit 1; }
+    echo -e "\n=== Bias Correction ==="
+    python "$BIAS_SCRIPT" "$HR_UPSCALED" "$LR_FILLED" ppt PRECTOTLAND "$LR_BC"
+    [[ -f "$LR_BC" ]] || { echo "Missing output: $LR_BC"; exit 1; }
 fi
 
 # --------------------------------
 # Step 3: Spatial Disaggregation
 # --------------------------------
-if [[ ! -f "$PRISM_GRID" ]]; then
-    echo "=== Create PRISM grid description ==="
-    cdo griddes "$PRISM" > "$PRISM_GRID"
-    [[ -f "$PRISM_GRID" ]] || { echo "Missing output: $PRISM_GRID"; exit 1; }
+if [[ ! -f "$HR_GRID" ]]; then
+    echo "=== Create HR grid description ==="
+    cdo griddes "$HR_NC" > "$HR_GRID"
+    [[ -f "$HR_GRID" ]] || { echo "Missing output: $HR_GRID"; exit 1; }
 fi
 
-if [[ -f "$MERRA_BC_INTERP" ]]; then
+if [[ -f "$LR_BC_INTERP" ]]; then
     echo "=== Remapped bias-corrected MERRA already exists; skipping ==="
 else
-    echo "=== Remap bias-corrected MERRA to PRISM grid ==="
-    cdo -O remapbil,"$PRISM_GRID" "$MERRA_BC" "$MERRA_BC_INTERP"
-    [[ -f "$MERRA_BC_INTERP" ]] || { echo "Missing output: $MERRA_BC_INTERP"; exit 1; }
+    echo -e "\n=== Remap bias-corrected MERRA to PRISM grid ==="
+    cdo -O remapbil,"$HR_GRID" "$LR_BC" "$LR_BC_INTERP"
+    [[ -f "$LR_BC_INTERP" ]] || { echo "Missing output: $LR_BC_INTERP"; exit 1; }
 fi
 
-if [[ -f "$PRISM_REINTERPOLATED" ]]; then
+if [[ -f "$HR_REINTERPOLATED" ]]; then
     echo "=== Reinterpolated PRISM already exists; skipping ==="
 else
-    echo "=== Interpolate upscaled PRISM to original resolution ==="
-    cdo -O remapbil,"$PRISM_GRID" "$PRISM_UPSCALED" "$PRISM_REINTERPOLATED"
-    [[ -f "$PRISM_REINTERPOLATED" ]] || { echo "Missing output: $PRISM_REINTERPOLATED"; exit 1; }
+    echo -e "\n=== Interpolate upscaled PRISM to original resolution ==="
+    cdo -O remapbil,"$HR_GRID" "$HR_UPSCALED" "$HR_REINTERPOLATED"
+    [[ -f "$HR_REINTERPOLATED" ]] || { echo "Missing output: $HR_REINTERPOLATED"; exit 1; }
 fi
 
 if [[ -f "$SCALE_FACTORS" ]]; then
     echo "=== Scale factors already exist; skipping ==="
 else
-    echo "=== Compute climatological scale factors ==="
-    cdo -O ydayavg "$PRISM_REINTERPOLATED" "$PRISM_INTERP_YDAYAVG"
-    cdo -O ydayavg "$PRISM" "$PRISM_YDAYAVG"
-    cdo -O div "$PRISM_YDAYAVG" "$PRISM_INTERP_YDAYAVG" "$SCALE_FACTORS"
+    echo -e "\n=== Compute climatological scale factors ==="
+    cdo -O ydayavg "$HR_REINTERPOLATED" "$HR_INTERP_YDAYAVG"
+    cdo -O ydayavg "$HR_NC" "$HR_YDAYAVG"
+    cdo -O div "$HR_YDAYAVG" "$HR_INTERP_YDAYAVG" "$SCALE_FACTORS"
 
-    [[ -f "$PRISM_INTERP_YDAYAVG" ]] || { echo "Missing output: $PRISM_INTERP_YDAYAVG"; exit 1; }
-    [[ -f "$PRISM_YDAYAVG" ]] || { echo "Missing output: $PRISM_YDAYAVG"; exit 1; }
+    [[ -f "$HR_INTERP_YDAYAVG" ]] || { echo "Missing output: $HR_INTERP_YDAYAVG"; exit 1; }
+    [[ -f "$HR_YDAYAVG" ]] || { echo "Missing output: $HR_YDAYAVG"; exit 1; }
     [[ -f "$SCALE_FACTORS" ]] || { echo "Missing output: $SCALE_FACTORS"; exit 1; }
 fi
 
 # --------------------------------
 # Step 4: Spatial Scaling
 # --------------------------------
-if [[ -f "$MERRA_BCSD" ]]; then
+if [[ -f "$LR_BCSD" ]]; then
     echo "=== Final BCSD output already exists; skipping ==="
 else
-    echo "=== Execute Spatial Scaling ==="
-    python "$SPATIAL_SCRIPT" "$MERRA_BC_INTERP" "$SCALE_FACTORS" "$MERRA_BCSD"
-    [[ -f "$MERRA_BCSD" ]] || { echo "Missing output: $MERRA_BCSD"; exit 1; }
+    echo -e "\n=== Execute Spatial Scaling ==="
+    python "$SPATIAL_SCRIPT" "$LR_BC_INTERP" "$SCALE_FACTORS" "$LR_BCSD"
+    [[ -f "$LR_BCSD" ]] || { echo "Missing output: $LR_BCSD"; exit 1; }
 fi
 
-echo "=== DONE ==="
+echo -e "\n=== DONE ==="
 echo "Outputs:"
-echo "  $PRISM_UPSCALED"
-echo "  $MERRA_FILLED"
-echo "  $MERRA_BC"
-echo "  $MERRA_BC_INTERP"
-echo "  $PRISM_REINTERPOLATED"
-echo "  $PRISM_INTERP_YDAYAVG"
-echo "  $PRISM_YDAYAVG"
+echo "  $HR_UPSCALED"
+echo "  $LR_FILLED"
+echo "  $LR_BC"
+echo "  $LR_BC_INTERP"
+echo "  $HR_REINTERPOLATED"
+echo "  $HR_INTERP_YDAYAVG"
+echo "  $HR_YDAYAVG"
 echo "  $SCALE_FACTORS"
-echo "  $MERRA_BCSD"
+echo "  $LR_BCSD"
