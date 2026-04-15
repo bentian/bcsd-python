@@ -12,13 +12,15 @@ import xarray as xr
 from bias_correct import BiasCorrectDaily, convert_to_float32
 
 
-def _daily_resample(ds: xr.Dataset) -> xr.Dataset:
-    """Resample to daily frequency using the default mean aggregation.
+def _load_and_prepare(path, drop_time_bnds=False):
+    """Load and prepare dataset for bias correction."""
+    ds = xr.open_dataset(path)
+    if drop_time_bnds:
+        ds = ds.drop_vars("time_bnds", errors="ignore")
 
-    The original repo used an old xarray signature equivalent to a daily
-    resample followed by an aggregation. Here we make that explicit.
-    """
-    return ds.resample(time="1D").mean()
+    return convert_to_float32(
+        ds.load().dropna(dim="time", how="all").resample(time="1D").mean()
+    )
 
 
 def main() -> None:
@@ -61,20 +63,9 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    print("Loading observations")
-    obs_data = xr.open_dataset(args.fobserved)
-    obs_data = obs_data.load()
-    obs_data = obs_data.dropna(dim="time", how="all")
-    obs_data = _daily_resample(obs_data)
-    obs_data = convert_to_float32(obs_data)
-
-    print("Loading modeled data")
-    modeled_data = xr.open_dataset(args.fmodeled)
-    if args.drop_time_bnds:
-        modeled_data = modeled_data.drop_vars("time_bnds", errors="ignore")
-    modeled_data = modeled_data.load()
-    modeled_data = _daily_resample(modeled_data)
-    modeled_data = convert_to_float32(modeled_data)
+    print("Loading data")
+    obs_data = _load_and_prepare(args.fobserved)
+    modeled_data = _load_and_prepare(args.fmodeled, drop_time_bnds=args.drop_time_bnds)
 
     print("Starting BCSD daily bias correction")
     t0 = time.time()
@@ -86,10 +77,10 @@ def main() -> None:
         args.var2,
         njobs=args.njobs,
     )
-    elapsed = time.time() - t0
-    print(f"Finished in {elapsed:.2f} seconds")
 
+    print(f"Finished in {time.time() - t0:.2f} seconds")
     corrected.to_netcdf(args.ofile)
+
     print(f"Saved: {args.ofile}")
 
 

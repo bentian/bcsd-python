@@ -20,7 +20,7 @@ HR_YDAYAVG="$WORKDIR/hr_ydayavg.nc"
 SCALE_FACTORS="$WORKDIR/scale_factors.nc"
 LR_BCSD="$WORKDIR/lr_bcsd.nc"
 
-BIAS_SCRIPT="./merra_prism_example.py"
+BIAS_SCRIPT="./run_bc.py"
 SPATIAL_SCRIPT="./spatial_scaling.py"
 
 mkdir -p "$WORKDIR"

@@ -25,8 +25,8 @@ def convert_to_float32(ds: xr.Dataset) -> xr.Dataset:
 
 
 def _day_range(day: int, pool: int) -> np.ndarray:
-    """Return wrapped day-of-year window centered on `day`.
-
+    """
+    Return wrapped day-of-year window centered on `day`.
     Replicates the original repo's wrapping behavior over 1..366.
     """
     days = (np.arange(day - pool, day + pool + 1) + 366 - 1) % 366 + 1
@@ -34,12 +34,14 @@ def _day_range(day: int, pool: int) -> np.ndarray:
 
 
 def _ensure_daily_datetime_sorted(ds: xr.Dataset) -> xr.Dataset:
+    """Ensure dataset has a daily datetime coordinate and is sorted."""
     if "time" not in ds.dims and "time" not in ds.coords:
         raise ValueError("Dataset must contain a time coordinate.")
     return ds.sortby("time")
 
 
 def _mapper(x: np.ndarray, y: np.ndarray, train_count: int, step: float) -> np.ndarray:
+    """Apply quantile mapping to data."""
     qmap = QMap(step=step)
     qmap.fit(x[:train_count], y[:train_count], axis=0)
     return qmap.predict(y)
